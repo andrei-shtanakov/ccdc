@@ -1,0 +1,175 @@
+easyblock = 'Binary'
+
+name = 'ccdc'
+version = '2026.2.0'
+
+homepage = 'https://www.ccdc.cam.ac.uk/'
+description = """The Cambridge Structural Database (CSD) Portfolio 2026.2."""
+
+toolchain = {'name': 'GCCcore', 'version': '12.3.0'}
+
+# Extract the helper archive; keep the proprietary installer as a runnable file.
+extract_sources = True
+start_dir = '%(builddir)s'
+sources = [{
+    'filename': 'CSDInstallerOffline-%(version)s-linux',
+    'extract_cmd': 'cp %s .',
+}, {
+    'filename': 'ccdc-site-config-%(version)s-1.tar.gz',
+    'extract_cmd': 'tar -xzf %s',
+}]
+checksums = [
+    '442f1fa1f0ce0bfe707468f09b967e6eb12186bc73850257504f4c1a62c94c22',
+    'ae5118cb141b1c841a5075e8730f45a6c183fc7e4bd604acc45442e3c3717790',
+]
+
+dependencies = [
+    ('X11', '20230603'),
+    ('Mesa', '23.1.4'),
+]
+
+# Install software and data. The local CSD copy is needed for the later manual transfer.
+install_cmd = 'chmod +x "CSDInstallerOffline-%(version)s-linux" && '
+install_cmd += './CSDInstallerOffline-%(version)s-linux '
+install_cmd += '--root "%(installdir)s" -c --accept-licenses install uk.ac.cam.ccdc'
+
+postinstallcmds = [
+    r"""
+set -eu
+for lib in libxcb-cursor.so.0 libxkbcommon-x11.so.0 libxcb-icccm.so.4 \
+           libxcb-image.so.0 libxcb-keysyms.so.1 libxcb-render-util.so.0; do
+    test -f "$EBROOTX11/lib/$lib" || { echo "MISSING in X11: $lib" >&2; exit 1; }
+done
+
+for app in "%(installdir)s"/ccdc-software/*/c_linux-64/lib; do
+    if [ -d "$app" ]; then
+        echo "Bundling Qt6 xcb deps into $app"
+        cp -av "$EBROOTX11"/lib/libxcb-cursor.so*      "$app/"
+        cp -av "$EBROOTX11"/lib/libxkbcommon-x11.so*   "$app/"
+        cp -av "$EBROOTX11"/lib/libxcb-icccm.so*       "$app/"
+        cp -av "$EBROOTX11"/lib/libxcb-image.so*       "$app/"
+        cp -av "$EBROOTX11"/lib/libxcb-keysyms.so*     "$app/"
+        cp -av "$EBROOTX11"/lib/libxcb-render-util.so* "$app/"
+    fi
+done
+""",
+    # Preserve inherited library paths without adding an empty path component.
+    r"""
+find "%(installdir)s" -name 'ccdc_common_linux_startup.sh' -exec sed -i \
+    's|export LD_LIBRARY_PATH=\$DISTRIBUTION_ROOT/c_linux-64/lib$|export LD_LIBRARY_PATH="$DISTRIBUTION_ROOT/c_linux-64/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"|g' {} +
+""",
+    # Keep the existing runtime workarounds for ConQuest.
+    'rm -f "%(installdir)s/ccdc-software/conquest/c_linux-64/lib/libcrypto.so.1.1"',
+    'rm -f "%(installdir)s/ccdc-software/conquest/c_linux-64/lib/libstdc++.so.6"',
+
+    # /db is unavailable on the build node. Retain the database for manual
+    # copying after the build; do not create a replacement directory or link.
+    r"""
+set -eu
+csd_dir='%(installdir)s/ccdc-data/csd'
+backup_dir='%(installdir)s/ccdc-data/csd.installer'
+
+if [ ! -d "$csd_dir" ] || [ -L "$csd_dir" ]; then
+    echo "Expected a local CSD directory: $csd_dir" >&2
+    exit 1
+fi
+if [ -e "$backup_dir" ] || [ -L "$backup_dir" ]; then
+    echo "Refusing to overwrite existing CSD copy: $backup_dir" >&2
+    exit 1
+fi
+
+# Validate only the local files produced by the installer.
+for file in as601be.inf as601be_CIP.sqlite Feb26_CIP.sqlite May26_CIP.sqlite Sep26_CIP.sqlite; do
+    if [ ! -r "$csd_dir/$file" ]; then
+        echo "Missing or unreadable local CSD file: $csd_dir/$file" >&2
+        exit 1
+    fi
+done
+
+mv "$csd_dir" "$backup_dir"
+test ! -e "$csd_dir"
+test ! -L "$csd_dir"
+""",
+    # Helpers are unpacked by EasyBuild, then copied without executing them.
+    r"""
+set -eu
+helper_dir='%(builddir)s/ccdc-site-config-%(version)s-1'
+install -d "%(installdir)s/site"
+install -m 755 "$helper_dir/configure-ccdc.sh" "%(installdir)s/site/configure-ccdc.sh"
+install -m 644 "$helper_dir/configure-ccdc.py" "%(installdir)s/site/configure-ccdc.py"
+""",
+]
+
+postinstallmsgs = [
+    'CSD data are retained in %(installdir)s/ccdc-data/csd.installer/. '
+    'Manually copy the contents of that directory to '
+    '/db/ccdc/csd/csd/2026/ccdc-data/csd/ after the build. '
+    'Database access must then be checked on a node where /db is available.',
+    'Loading the module on a runtime node configures ~/.config/CCDC/CSD.ini and '
+    'ApplicationServices.ini using /cm/shared/.site. Existing files are backed up '
+    'when their managed setting changes. Without the shared database, configuration is skipped.',
+]
+
+modextravars = {
+    'CSDHOME': '%(installdir)s',
+}
+
+# run_csd_python_api activates the bundled Conda environment itself.
+# Do not add miniconda/bin, PYTHONHOME or PYTHONPATH to the module.
+modextrapaths = {
+    'PATH': [
+        'ccdc-software/conformer-generator/bin',
+        'ccdc-software/conquest/bin',
+        'ccdc-software/csd-crossminer/bin',
+        'ccdc-software/csd-editor/bin',
+        'ccdc-software/csd-python-api',
+        'ccdc-software/encifer/bin',
+        'ccdc-software/gold/bin',
+        'ccdc-software/hermes/bin',
+        'ccdc-software/isostar/bin',
+        'ccdc-software/mercury/bin',
+        'ccdc-software/mogul/bin',
+        'ccdc-software/superstar/bin',
+        'ccdc-utilities/software-activation/bin',
+    ],
+}
+
+# Check local installation files, not the unavailable /db target.
+sanity_check_paths = {
+    'files': [
+        'ccdc-software/mercury/bin/mercury',
+        'ccdc-software/mogul/bin/mogul',
+        'ccdc-software/conquest/bin/cq',
+        'ccdc-software/mercury/c_linux-64/lib/libxcb-cursor.so.0',
+        'ccdc-software/csd-python-api/run_csd_python_api',
+        'ccdc-software/csd-python-api/miniconda/bin/python',
+        'site/configure-ccdc.sh',
+        'site/configure-ccdc.py',
+        'ccdc-data/csd.installer/as601be.inf',
+        'ccdc-data/csd.installer/as601be_CIP.sqlite',
+        'ccdc-data/csd.installer/Feb26_CIP.sqlite',
+        'ccdc-data/csd.installer/May26_CIP.sqlite',
+        'ccdc-data/csd.installer/Sep26_CIP.sqlite',
+    ],
+    'dirs': ['ccdc-software', 'ccdc-utilities', 'ccdc-data'],
+}
+
+sanity_check_commands = [
+    ('test', '! -e "%(installdir)s/ccdc-data/csd"'),
+    ('test', '! -L "%(installdir)s/ccdc-data/csd"'),
+    ('bash', '-n "%(installdir)s/site/configure-ccdc.sh"'),
+]
+
+# The helper creates the licence file too: do not require it before module load.
+# execute is deferred to the caller's shell; helper errors do not roll back Lmod.
+# No user-file writes on show, spider, or unload; unloading does not undo settings.
+modluafooter = """
+if mode() == "load" then
+    execute {
+        cmd = [[/bin/bash '%(installdir)s/site/configure-ccdc.sh']],
+        modeA = {"load"}
+    }
+end
+"""
+
+moduleclass = 'chem'
